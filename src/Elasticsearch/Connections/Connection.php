@@ -198,6 +198,11 @@ class Connection implements ConnectionInterface
             $this->headers = array_merge($this->headers, $options['client']['headers']);
         }
 
+        $host = $this->host;
+        if (isset($this->connectionParams['client']['port_in_header']) && $this->connectionParams['client']['port_in_header']) {
+            $host .= ':' . $this->port;
+        }
+        
         $request = [
             'http_method' => $method,
             'scheme'      => $this->transportSchema,
@@ -205,7 +210,7 @@ class Connection implements ConnectionInterface
             'body'        => $body,
             'headers'     => array_merge(
                 [
-                'Host'  => [$this->host]
+                'Host'  => [$host]
                 ],
                 $this->headers
             )
@@ -376,7 +381,7 @@ class Connection implements ConnectionInterface
             array(
                 'method'    => $request['http_method'],
                 'uri'       => $response['effective_url'],
-                'port'      => $response['transfer_stats']['primary_port'],
+                'port'      => $response['transfer_stats']['primary_port'] ?? '',
                 'headers'   => $request['headers'],
                 'HTTP code' => $response['status'],
                 'duration'  => $response['transfer_stats']['total_time'],
@@ -417,7 +422,7 @@ class Connection implements ConnectionInterface
             array(
                 'method'    => $request['http_method'],
                 'uri'       => $response['effective_url'],
-                'port'      => $response['transfer_stats']['primary_port'],
+                'port'      => $response['transfer_stats']['primary_port'] ?? '',
                 'headers'   => $request['headers'],
                 'HTTP code' => $response['status'],
                 'duration'  => $response['transfer_stats']['total_time'],
@@ -679,8 +684,15 @@ class Connection implements ConnectionInterface
     {
         $error = $this->serializer->deserialize($response['body'], $response['transfer_stats']);
         if (is_array($error) === true) {
+            if (isset($error['error']) === false) {
+                // <2.0 "i just blew up" nonstructured exception
+                // $error is an array but we don't know the format, reuse the response body instead
+                // added json_encode to convert into a string
+                return new $errorClass(json_encode($response['body']), (int) $response['status']);
+            }
+            
             // 2.0 structured exceptions
-            if (isset($error['error']['reason']) === true) {
+            if (is_array($error['error']) && array_key_exists('reason', $error['error']) === true) {
                 // Try to use root cause first (only grabs the first root cause)
                 $root = $error['error']['root_cause'];
                 if (isset($root) && isset($root[0])) {
@@ -694,18 +706,16 @@ class Connection implements ConnectionInterface
                 $original = new $errorClass(json_encode($response['body']), $response['status']);
 
                 return new $errorClass("$type: $cause", (int) $response['status'], $original);
-            } elseif (isset($error['error']) === true) {
-                // <2.0 semi-structured exceptions
-                // added json_encode to convert into a string
-                $original = new $errorClass(json_encode($response['body']), $response['status']);
-
-                return new $errorClass($error['error'], (int) $response['status'], $original);
             }
-
-            // <2.0 "i just blew up" nonstructured exception
-            // $error is an array but we don't know the format, reuse the response body instead
+            // <2.0 semi-structured exceptions
             // added json_encode to convert into a string
-            return new $errorClass(json_encode($response['body']), (int) $response['status']);
+            $original = new $errorClass(json_encode($response['body']), $response['status']);
+            
+            $errorEncoded = $error['error'];
+            if (is_array($errorEncoded)) {
+                $errorEncoded = json_encode($errorEncoded);
+            }
+            return new $errorClass($errorEncoded, (int) $response['status'], $original);
         }
 
         // if responseBody is not string, we convert it so it can be used as Exception message
